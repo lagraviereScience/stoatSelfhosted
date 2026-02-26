@@ -1,0 +1,231 @@
+name: stoat
+
+services:
+  database:
+    image: docker.io/mongo
+    restart: always
+    volumes:
+      - /path/to/stoat/database:/data/db
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    networks:
+      - private_stoat_network
+
+  redis:
+    image: eqalpha/keydb
+    restart: always
+    networks:
+      - private_stoat_network
+
+  rabbit:
+    image: docker.io/rabbitmq:4
+    restart: always
+    environment:
+      RABBITMQ_DEFAULT_USER: rabbituser
+      RABBITMQ_DEFAULT_PASS: rabbitpass
+    volumes:
+      - /path/to/stoat/rabbit:/var/lib/rabbitmq
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - private_stoat_network
+
+  minio:
+    image: docker.io/minio/minio
+    command: server /data --console-address ":9001"
+    restart: always
+    volumes:
+      - /path/to/stoat/minio:/data
+    environment:
+      MINIO_ROOT_USER: minio_user
+      MINIO_ROOT_PASSWORD: minio_password
+      MINIO_DOMAIN: minio
+    networks:
+      private_stoat_network:
+        aliases:
+          - uploads.minio
+          - attachments.minio
+          - avatars.minio
+          - backgrounds.minio
+          - icons.minio
+          - banners.minio
+          - emojis.minio
+
+  caddy:
+    image: docker.io/caddy
+    restart: always
+    environment:
+      HOSTNAME: ${HOSTNAME}
+      REVOLT_PUBLIC_URL: ${REVOLT_PUBLIC_URL}
+      VITE_API_URL: ${VITE_API_URL}
+      VITE_WS_URL: ${VITE_WS_URL}
+      VITE_MEDIA_URL: ${VITE_MEDIA_URL}
+      VITE_PROXY_URL: ${VITE_PROXY_URL}
+    volumes:
+      - /path/to/stoat/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - /path/to/stoat/caddy/data:/data
+      - /path/to/stoat/caddy/config:/config
+    networks:
+      - docker_network_that_traefik_is_connected_to
+      - private_stoat_network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.stoat.rule=Host(`stoat.yourDomain.com`)"
+      - "traefik.http.routers.stoat.entrypoints=websecure"
+      - "traefik.http.routers.stoat.tls.certresolver=myresolver"
+      - "traefik.http.services.stoat.loadbalancer.server.port=80"
+      - "traefik.docker.network=docker_network_that_traefik_is_connected_to"
+
+  api:
+    image: ghcr.io/stoatchat/api:v0.11.1
+    restart: always
+    depends_on:
+      database:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - /path/to/stoat/configs/Revolt.toml:/Revolt.toml
+    networks:
+      - private_stoat_network
+
+  events:
+    image: ghcr.io/stoatchat/events:v0.11.1
+    restart: always
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - /path/to/stoat/configs/Revolt.toml:/Revolt.toml
+    networks:
+      - private_stoat_network
+
+  autumn:
+    image: ghcr.io/stoatchat/file-server:v0.11.1
+    restart: always
+    depends_on:
+      database:
+        condition: service_healthy
+      createbuckets:
+        condition: service_completed_successfully
+    volumes:
+      - /path/to/stoat/configs/Revolt.toml:/Revolt.toml
+    networks:
+      - private_stoat_network
+
+  january:
+    image: ghcr.io/stoatchat/proxy:v0.11.1
+    restart: always
+    volumes:
+      - /path/to/stoat/configs/Revolt.toml:/Revolt.toml
+    networks:
+      - private_stoat_network
+
+  gifbox:
+    image: ghcr.io/stoatchat/gifbox:v0.11.1
+    restart: always
+    volumes:
+      - /path/to/stoat/configs/Revolt.toml:/Revolt.toml
+    networks:
+      - private_stoat_network
+
+  crond:
+    image: ghcr.io/stoatchat/crond:v0.11.1
+    restart: always
+    depends_on:
+      database:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    volumes:
+      - /path/to/stoat/configs/Revolt.toml:/Revolt.toml
+    networks:
+      - private_stoat_network
+
+  pushd:
+    image: ghcr.io/stoatchat/pushd:v0.11.1
+    restart: always
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      rabbit:
+        condition: service_healthy
+    volumes:
+      - /path/to/stoat/configs/Revolt.toml:/Revolt.toml
+    networks:
+      - private_stoat_network
+
+  voice-ingress:
+    image: ghcr.io/stoatchat/voice-ingress:v0.11.1
+    restart: always
+    depends_on:
+      database:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+    volumes:
+      - /path/to/stoat/configs/Revolt.toml:/Revolt.toml
+    networks:
+      - private_stoat_network
+
+  livekit:
+    image: ghcr.io/stoatchat/livekit-server:v1.9.6
+    command: --config /etc/livekit.yml
+    restart: always
+    volumes:
+      - /path/to/stoat/configs/livekit.yml:/etc/livekit.yml
+    ports:
+      - "7881:7881"
+      - "50000-50100:50000-50100/udp"
+    networks:
+      - private_stoat_network
+
+  createbuckets:
+    image: docker.io/minio/mc
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      until /usr/bin/mc alias set minio http://minio:9000 minio_user minio_password; do
+        echo 'Waiting for MinIO...';
+        sleep 2;
+      done;
+      /usr/bin/mc mb minio/uploads || true;
+      exit 0;
+      "
+    networks:
+      - private_stoat_network
+
+  web:
+    image: ghcr.io/stoatchat/for-web:addb6b7
+    restart: always
+    environment:
+      HOSTNAME: ${HOSTNAME}
+      REVOLT_PUBLIC_URL: ${REVOLT_PUBLIC_URL}
+      VITE_API_URL: ${VITE_API_URL}
+      VITE_WS_URL: ${VITE_WS_URL}
+      VITE_MEDIA_URL: ${VITE_MEDIA_URL}
+      VITE_PROXY_URL: ${VITE_PROXY_URL}
+    networks:
+      - private_stoat_network
+
+networks:
+  docker_network_that_traefik_is_connected_to:
+    external: true
+  private_stoat_network:
+    driver: bridge
